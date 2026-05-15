@@ -1,6 +1,7 @@
 defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
   use UnitAPICase, async: true
 
+  alias Lux.Integrations.Telegram.GroupManager
   alias Lux.Prisms.Telegram.Group.ManageGroup
 
   @chat_id -100_123_456
@@ -156,11 +157,18 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
 
       assert prism.input_schema.required == ["action"]
       assert "ban_member" in prism.input_schema.properties.action.enum
+      assert "create_forum_topic" in prism.input_schema.properties.action.enum
+      assert "unpin_all_general_forum_topic_messages" in prism.input_schema.properties.action.enum
       assert "moderate_message" in prism.input_schema.properties.action.enum
       assert "log_admin_action" in prism.input_schema.properties.action.enum
+      assert Map.has_key?(prism.input_schema.properties, :message_thread_id)
+      assert Map.has_key?(prism.input_schema.properties, :icon_custom_emoji_id)
       assert Map.has_key?(prism.input_schema.properties, :execute)
       assert Map.has_key?(prism.output_schema.properties, :requests)
       assert Map.has_key?(prism.output_schema.properties, :audit_entry)
+
+      assert MapSet.new(prism.input_schema.properties.action.enum) ==
+               MapSet.new(Enum.map(GroupManager.known_actions(), &Atom.to_string/1))
     end
   end
 end

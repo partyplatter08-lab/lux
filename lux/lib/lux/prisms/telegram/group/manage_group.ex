@@ -35,7 +35,18 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
     unpin_all_messages
     set_sticker_set
     delete_sticker_set
-    set_forum
+    create_forum_topic
+    edit_forum_topic
+    close_forum_topic
+    reopen_forum_topic
+    delete_forum_topic
+    unpin_all_forum_topic_messages
+    edit_general_forum_topic
+    close_general_forum_topic
+    reopen_general_forum_topic
+    hide_general_forum_topic
+    unhide_general_forum_topic
+    unpin_all_general_forum_topic_messages
     send_channel_post
     edit_channel_post
     edit_channel_caption
@@ -88,9 +99,25 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
           type: :array,
           description: "Message ids for bulk deleteMessages moderation"
         },
+        message_thread_id: %{
+          type: :integer,
+          description: "Target forum topic message thread id"
+        },
         text: %{
           type: :string,
           description: "Message text or content to evaluate for moderation"
+        },
+        name: %{
+          type: :string,
+          description: "Invite link name or forum topic name"
+        },
+        icon_color: %{
+          type: :integer,
+          description: "Forum topic icon RGB color accepted by Telegram"
+        },
+        icon_custom_emoji_id: %{
+          type: :string,
+          description: "Custom emoji id used for a forum topic icon"
         },
         caption: %{
           type: :string,

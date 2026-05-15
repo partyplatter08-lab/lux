@@ -6,6 +6,55 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
   @chat_id -100_123_456
   @user_id 987_654
   @message_id 42
+  @message_thread_id 7
+
+  @official_bot_api_paths MapSet.new([
+                            "/approveChatJoinRequest",
+                            "/banChatMember",
+                            "/banChatSenderChat",
+                            "/closeForumTopic",
+                            "/closeGeneralForumTopic",
+                            "/copyMessage",
+                            "/createChatInviteLink",
+                            "/createForumTopic",
+                            "/declineChatJoinRequest",
+                            "/deleteChatPhoto",
+                            "/deleteChatStickerSet",
+                            "/deleteForumTopic",
+                            "/deleteMessage",
+                            "/deleteMessages",
+                            "/editChatInviteLink",
+                            "/editForumTopic",
+                            "/editGeneralForumTopic",
+                            "/editMessageCaption",
+                            "/editMessageText",
+                            "/forwardMessage",
+                            "/getChatAdministrators",
+                            "/getChatMember",
+                            "/getChatMemberCount",
+                            "/hideGeneralForumTopic",
+                            "/pinChatMessage",
+                            "/promoteChatMember",
+                            "/restrictChatMember",
+                            "/reopenForumTopic",
+                            "/reopenGeneralForumTopic",
+                            "/revokeChatInviteLink",
+                            "/sendMessage",
+                            "/setChatAdministratorCustomTitle",
+                            "/setChatDescription",
+                            "/setChatMemberTag",
+                            "/setChatPermissions",
+                            "/setChatSlowModeDelay",
+                            "/setChatStickerSet",
+                            "/setChatTitle",
+                            "/unbanChatMember",
+                            "/unbanChatSenderChat",
+                            "/unhideGeneralForumTopic",
+                            "/unpinAllChatMessages",
+                            "/unpinAllForumTopicMessages",
+                            "/unpinAllGeneralForumTopicMessages",
+                            "/unpinChatMessage"
+                          ])
 
   setup do
     Req.Test.verify_on_exit!()
@@ -17,6 +66,19 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert :moderate_message in GroupManager.known_actions()
       assert :log_admin_action in GroupManager.known_actions()
       assert :copy_channel_post in GroupManager.known_actions()
+      assert :create_forum_topic in GroupManager.known_actions()
+      assert :unpin_all_general_forum_topic_messages in GroupManager.known_actions()
+    end
+
+    test "advertised actions emit official Telegram Bot API paths" do
+      for action <- GroupManager.known_actions() do
+        assert {:ok, plan} = GroupManager.plan(action, action_params(action))
+        assert plan.requests != []
+
+        assert Enum.all?(plan.requests, fn request ->
+                 MapSet.member?(@official_bot_api_paths, request.path)
+               end)
+      end
     end
 
     test "builds Telegram ChatPermissions templates with current permission flags" do
@@ -192,7 +254,7 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
   end
 
   describe "settings and channel post plans" do
-    test "plans chat setting variants and forum/sticker controls" do
+    test "plans chat setting variants and sticker controls" do
       for {action, expected_path, params} <- [
             {"set-title", "/setChatTitle", %{title: "Lux Research"}},
             {:set_description, "/setChatDescription", %{description: ""}},
@@ -206,8 +268,34 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
             {:unpin_message, "/unpinChatMessage", %{message_id: @message_id}},
             {:unpin_all_messages, "/unpinAllChatMessages", %{}},
             {:set_sticker_set, "/setChatStickerSet", %{sticker_set_name: "lux_stickers"}},
-            {:delete_sticker_set, "/deleteChatStickerSet", %{}},
-            {:set_forum, "/setChatIsForum", %{is_forum: true}}
+            {:delete_sticker_set, "/deleteChatStickerSet", %{}}
+          ] do
+        assert {:ok, plan} = GroupManager.plan(action, Map.put(params, :chat_id, @chat_id))
+        assert [%{path: ^expected_path}] = plan.requests
+      end
+    end
+
+    test "plans official forum topic operations" do
+      for {action, expected_path, params} <- [
+            {:create_forum_topic, "/createForumTopic",
+             %{
+               name: "Research",
+               icon_color: 7_322_096,
+               icon_custom_emoji_id: "emoji-topic"
+             }},
+            {:edit_forum_topic, "/editForumTopic",
+             %{message_thread_id: @message_thread_id, name: "Research Q&A"}},
+            {:close_forum_topic, "/closeForumTopic", %{message_thread_id: @message_thread_id}},
+            {:reopen_forum_topic, "/reopenForumTopic", %{message_thread_id: @message_thread_id}},
+            {:delete_forum_topic, "/deleteForumTopic", %{message_thread_id: @message_thread_id}},
+            {:unpin_all_forum_topic_messages, "/unpinAllForumTopicMessages",
+             %{message_thread_id: @message_thread_id}},
+            {:edit_general_forum_topic, "/editGeneralForumTopic", %{name: "General Chat"}},
+            {:close_general_forum_topic, "/closeGeneralForumTopic", %{}},
+            {:reopen_general_forum_topic, "/reopenGeneralForumTopic", %{}},
+            {:hide_general_forum_topic, "/hideGeneralForumTopic", %{}},
+            {:unhide_general_forum_topic, "/unhideGeneralForumTopic", %{}},
+            {:unpin_all_general_forum_topic_messages, "/unpinAllGeneralForumTopicMessages", %{}}
           ] do
         assert {:ok, plan} = GroupManager.plan(action, Map.put(params, :chat_id, @chat_id))
         assert [%{path: ^expected_path}] = plan.requests
@@ -598,8 +686,8 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert {:error, "Missing or invalid title"} =
                GroupManager.plan(:set_title, %{chat_id: @chat_id, title: ""})
 
-      assert {:error, "Missing or invalid is_forum"} =
-               GroupManager.plan(:set_forum, %{chat_id: @chat_id, is_forum: "yes"})
+      assert {:error, "Missing or invalid message_thread_id"} =
+               GroupManager.plan(:close_forum_topic, %{chat_id: @chat_id})
 
       assert {:error, "message_ids must include between 1 and 100 message ids"} =
                GroupManager.plan(:delete_messages, %{chat_id: @chat_id, message_ids: []})
@@ -652,4 +740,104 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
                })
     end
   end
+
+  defp action_params(action) do
+    Map.merge(%{chat_id: @chat_id}, action_specific_params(action))
+  end
+
+  defp action_specific_params(action)
+       when action in [:ban_member, :unban_member, :get_member] do
+    %{user_id: @user_id}
+  end
+
+  defp action_specific_params(:restrict_member) do
+    %{user_id: @user_id, permission_template: :read_only}
+  end
+
+  defp action_specific_params(:promote_member) do
+    %{user_id: @user_id, admin_template: :moderator}
+  end
+
+  defp action_specific_params(:demote_member), do: %{user_id: @user_id}
+
+  defp action_specific_params(:set_admin_title) do
+    %{user_id: @user_id, custom_title: "Ops"}
+  end
+
+  defp action_specific_params(:set_member_tag), do: %{user_id: @user_id, tag: "vip"}
+
+  defp action_specific_params(action) when action in [:ban_sender_chat, :unban_sender_chat] do
+    %{sender_chat_id: -100_777_777}
+  end
+
+  defp action_specific_params(:set_permissions), do: %{permission_template: :standard}
+  defp action_specific_params(:set_title), do: %{title: "Lux Research"}
+  defp action_specific_params(:set_description), do: %{description: "Community updates"}
+  defp action_specific_params(:set_slow_mode), do: %{slow_mode_delay: 0}
+  defp action_specific_params(:edit_invite_link), do: %{invite_link: "https://t.me/+abc"}
+  defp action_specific_params(:revoke_invite_link), do: %{invite_link: "https://t.me/+abc"}
+
+  defp action_specific_params(action)
+       when action in [:approve_join_request, :decline_join_request] do
+    %{user_id: @user_id}
+  end
+
+  defp action_specific_params(action) when action in [:pin_message, :unpin_message] do
+    %{message_id: @message_id}
+  end
+
+  defp action_specific_params(:set_sticker_set), do: %{sticker_set_name: "lux_stickers"}
+
+  defp action_specific_params(:create_forum_topic) do
+    %{name: "Research", icon_color: 7_322_096, icon_custom_emoji_id: "emoji-topic"}
+  end
+
+  defp action_specific_params(:edit_forum_topic) do
+    %{message_thread_id: @message_thread_id, name: "Research Q&A"}
+  end
+
+  defp action_specific_params(action)
+       when action in [
+              :close_forum_topic,
+              :reopen_forum_topic,
+              :delete_forum_topic,
+              :unpin_all_forum_topic_messages
+            ] do
+    %{message_thread_id: @message_thread_id}
+  end
+
+  defp action_specific_params(:edit_general_forum_topic), do: %{name: "General Chat"}
+  defp action_specific_params(:send_channel_post), do: %{text: "Launch update"}
+
+  defp action_specific_params(:edit_channel_post) do
+    %{message_id: @message_id, text: "Updated"}
+  end
+
+  defp action_specific_params(:edit_channel_caption) do
+    %{message_id: @message_id, caption: "Updated caption"}
+  end
+
+  defp action_specific_params(:delete_channel_post), do: %{message_id: @message_id}
+  defp action_specific_params(:delete_messages), do: %{message_ids: [40, 41, 42]}
+
+  defp action_specific_params(action)
+       when action in [:forward_channel_post, :copy_channel_post] do
+    %{from_chat_id: -100_555_555, message_id: @message_id}
+  end
+
+  defp action_specific_params(:moderate_message) do
+    %{
+      user_id: @user_id,
+      message_id: @message_id,
+      text: "spam",
+      moderation_action: :restrict_member,
+      policy: %{max_length: 1}
+    }
+  end
+
+  defp action_specific_params(:log_admin_action) do
+    %{logged_action: "manual_review", log_chat_id: -100_999}
+  end
+
+  defp action_specific_params(_action), do: %{}
 end

@@ -236,6 +236,17 @@ ManageGroup.handler(
   %{name: "Moderator Bot"}
 )
 
+# Create a forum topic in a supergroup
+ManageGroup.handler(
+  %{
+    action: :create_forum_topic,
+    chat_id: -100_123_456,
+    name: "Research Q&A",
+    icon_color: 7_322_096
+  },
+  %{name: "Moderator Bot"}
+)
+
 # Publish a channel post
 ManageGroup.handler(
   %{
@@ -251,8 +262,9 @@ ManageGroup.handler(
 For moderation, pass a policy with blocked terms, regex patterns, link rules,
 rate thresholds, or message-shape limits. The prism returns violations, the
 chosen moderation action, Bot API requests, and a normalized audit entry.
-Bulk deletes, sender-chat bans, member tags, and standalone audit-log messages
-are also available through the same `action` field.
+Bulk deletes, sender-chat bans, member tags, forum topic controls, and
+standalone audit-log messages are also available through the same `action`
+field.
 
 ```elixir
 {:ok, moderation} =

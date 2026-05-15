@@ -76,7 +76,18 @@ defmodule Lux.Integrations.Telegram.GroupManager do
     :unpin_all_messages,
     :set_sticker_set,
     :delete_sticker_set,
-    :set_forum,
+    :create_forum_topic,
+    :edit_forum_topic,
+    :close_forum_topic,
+    :reopen_forum_topic,
+    :delete_forum_topic,
+    :unpin_all_forum_topic_messages,
+    :edit_general_forum_topic,
+    :close_general_forum_topic,
+    :reopen_general_forum_topic,
+    :hide_general_forum_topic,
+    :unhide_general_forum_topic,
+    :unpin_all_general_forum_topic_messages,
     :send_channel_post,
     :edit_channel_post,
     :edit_channel_caption,
@@ -261,10 +272,76 @@ defmodule Lux.Integrations.Telegram.GroupManager do
       required: [:chat_id],
       optional: []
     },
-    set_forum: %{
+    create_forum_topic: %{
       category: :group_settings,
-      path: "/setChatIsForum",
-      required: [:chat_id, :is_forum],
+      path: "/createForumTopic",
+      required: [:chat_id, :name],
+      optional: [:icon_color, :icon_custom_emoji_id]
+    },
+    edit_forum_topic: %{
+      category: :group_settings,
+      path: "/editForumTopic",
+      required: [:chat_id, :message_thread_id],
+      optional: [:name, :icon_custom_emoji_id]
+    },
+    close_forum_topic: %{
+      category: :group_settings,
+      path: "/closeForumTopic",
+      required: [:chat_id, :message_thread_id],
+      optional: []
+    },
+    reopen_forum_topic: %{
+      category: :group_settings,
+      path: "/reopenForumTopic",
+      required: [:chat_id, :message_thread_id],
+      optional: []
+    },
+    delete_forum_topic: %{
+      category: :group_settings,
+      path: "/deleteForumTopic",
+      required: [:chat_id, :message_thread_id],
+      optional: []
+    },
+    unpin_all_forum_topic_messages: %{
+      category: :group_settings,
+      path: "/unpinAllForumTopicMessages",
+      required: [:chat_id, :message_thread_id],
+      optional: []
+    },
+    edit_general_forum_topic: %{
+      category: :group_settings,
+      path: "/editGeneralForumTopic",
+      required: [:chat_id, :name],
+      optional: []
+    },
+    close_general_forum_topic: %{
+      category: :group_settings,
+      path: "/closeGeneralForumTopic",
+      required: [:chat_id],
+      optional: []
+    },
+    reopen_general_forum_topic: %{
+      category: :group_settings,
+      path: "/reopenGeneralForumTopic",
+      required: [:chat_id],
+      optional: []
+    },
+    hide_general_forum_topic: %{
+      category: :group_settings,
+      path: "/hideGeneralForumTopic",
+      required: [:chat_id],
+      optional: []
+    },
+    unhide_general_forum_topic: %{
+      category: :group_settings,
+      path: "/unhideGeneralForumTopic",
+      required: [:chat_id],
+      optional: []
+    },
+    unpin_all_general_forum_topic_messages: %{
+      category: :group_settings,
+      path: "/unpinAllGeneralForumTopicMessages",
+      required: [:chat_id],
       optional: []
     },
     send_channel_post: %{
@@ -1015,6 +1092,9 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   defp validate_required_key(params, :message_id),
     do: validate_integer(value(params, :message_id), :message_id)
 
+  defp validate_required_key(params, :message_thread_id),
+    do: validate_integer(value(params, :message_thread_id), :message_thread_id)
+
   defp validate_required_key(params, :message_ids),
     do: validate_message_ids(value(params, :message_ids))
 
@@ -1023,13 +1103,6 @@ defmodule Lux.Integrations.Telegram.GroupManager do
       {:ok, delay} when delay in 0..36_000 -> {:ok, delay}
       {:ok, _delay} -> {:error, "slow_mode_delay must be between 0 and 36000"}
       {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp validate_required_key(params, :is_forum) do
-    case value(params, :is_forum) do
-      value when is_boolean(value) -> {:ok, value}
-      _ -> {:error, "Missing or invalid is_forum"}
     end
   end
 
