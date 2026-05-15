@@ -65,6 +65,62 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
       assert [%{response: %{"result" => true}}] = result.results
     end
 
+    test "executes with string truthy values and ignores nil execution options" do
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path =~ "/unbanChatMember"
+
+        {:ok, body, _conn} = Plug.Conn.read_body(conn)
+        decoded_body = Jason.decode!(body)
+        assert decoded_body["only_if_banned"] == true
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true, "result" => true}))
+      end)
+
+      assert {:ok, result} =
+               ManageGroup.handler(
+                 %{
+                   action: "unban_member",
+                   chat_id: @chat_id,
+                   user_id: @user_id,
+                   only_if_banned: true,
+                   execute: "1",
+                   plug: nil
+                 },
+                 @agent_ctx
+               )
+
+      assert result.executed == true
+      assert [%{request: %{path: "/unbanChatMember"}}] = result.results
+    end
+
+    test "returns execution errors from the Telegram client" do
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        assert conn.request_path =~ "/banChatMember"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(403, Jason.encode!(%{"description" => "Forbidden"}))
+      end)
+
+      assert {:error, message} =
+               ManageGroup.handler(
+                 %{
+                   action: :ban_member,
+                   chat_id: @chat_id,
+                   user_id: @user_id,
+                   execute: true,
+                   token: "test-token"
+                 },
+                 @agent_ctx
+               )
+
+      assert message =~ "Failed to execute Telegram group action"
+      assert message =~ "Forbidden"
+    end
+
     test "builds moderation plans for flagged content" do
       assert {:ok, result} =
                ManageGroup.handler(
@@ -87,6 +143,7 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
 
     test "validates required action and parameters" do
       assert {:error, "Missing or invalid action"} = ManageGroup.handler(%{}, @agent_ctx)
+      assert {:error, "Missing or invalid action"} = ManageGroup.handler(nil, @agent_ctx)
 
       assert {:error, "Missing or invalid user_id"} =
                ManageGroup.handler(%{action: :ban_member, chat_id: @chat_id}, @agent_ctx)

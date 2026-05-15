@@ -13,6 +13,12 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
   end
 
   describe "permission and admin templates" do
+    test "lists known group management actions" do
+      assert :moderate_message in GroupManager.known_actions()
+      assert :log_admin_action in GroupManager.known_actions()
+      assert :copy_channel_post in GroupManager.known_actions()
+    end
+
     test "builds Telegram ChatPermissions templates with current permission flags" do
       assert {:ok, permissions} = GroupManager.permission_template(:media_limited)
 
@@ -23,6 +29,24 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert Map.has_key?(permissions, :can_edit_tag)
     end
 
+    test "builds standard and announcement permission templates from string names" do
+      assert {:ok, standard} = GroupManager.permission_template("standard")
+      assert standard.can_send_messages == true
+      assert standard.can_react_to_messages == true
+
+      assert {:ok, announcement} = GroupManager.permission_template("announcement")
+      assert announcement.can_send_messages == false
+      assert announcement.can_react_to_messages == true
+    end
+
+    test "rejects unsupported permission templates" do
+      assert {:error, "Unsupported permission template: \"unknown\""} =
+               GroupManager.permission_template("unknown")
+
+      assert {:error, "Unsupported permission template: 123"} =
+               GroupManager.permission_template(123)
+    end
+
     test "builds administrator role templates" do
       assert {:ok, rights} = GroupManager.admin_template("moderator")
 
@@ -31,9 +55,47 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert rights.can_restrict_members == true
       assert rights.can_post_messages == false
     end
+
+    test "builds publisher and community manager administrator templates" do
+      assert {:ok, publisher} = GroupManager.admin_template("publisher")
+      assert publisher.can_post_messages == true
+      assert publisher.can_edit_messages == true
+      assert publisher.can_restrict_members == false
+
+      assert {:ok, community_manager} = GroupManager.admin_template("community-manager")
+      assert community_manager.can_promote_members == true
+      assert community_manager.can_manage_tags == true
+    end
+
+    test "rejects unsupported administrator templates" do
+      assert {:error, "Unsupported admin template: \"owner\""} =
+               GroupManager.admin_template("owner")
+
+      assert {:error, "Unsupported admin template: :owner"} =
+               GroupManager.admin_template(:owner)
+    end
   end
 
   describe "member and permission plans" do
+    test "plans direct member management and lookup actions" do
+      for {action, expected_path, params} <- [
+            {:unban_member, "/unbanChatMember", %{user_id: @user_id, only_if_banned: true}},
+            {:promote_member, "/promoteChatMember",
+             %{user_id: @user_id, admin_template: "publisher"}},
+            {:set_admin_title, "/setChatAdministratorCustomTitle",
+             %{user_id: @user_id, custom_title: "Ops"}},
+            {:unban_sender_chat, "/unbanChatSenderChat", %{sender_chat_id: -100_777_777}},
+            {:get_member, "/getChatMember", %{user_id: @user_id}},
+            {:get_admins, "/getChatAdministrators", %{return_bots: true}},
+            {:get_member_count, "/getChatMemberCount", %{}},
+            {:approve_join_request, "/approveChatJoinRequest", %{user_id: @user_id}},
+            {:decline_join_request, "/declineChatJoinRequest", %{user_id: @user_id}}
+          ] do
+        assert {:ok, plan} = GroupManager.plan(action, Map.put(params, :chat_id, @chat_id))
+        assert [%{path: ^expected_path}] = plan.requests
+      end
+    end
+
     test "plans member restrictions with named permission templates" do
       assert {:ok, plan} =
                GroupManager.plan(:restrict_member, %{
@@ -69,6 +131,24 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert request.payload.can_manage_chat == false
       assert request.payload.can_restrict_members == false
       assert request.payload.can_promote_members == false
+    end
+
+    test "normalizes nil admin flags and explicit rights maps" do
+      assert {:ok, plan} =
+               GroupManager.plan(:promote_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 admin_rights: %{
+                   "can_invite_users" => false,
+                   can_manage_chat: nil,
+                   can_delete_messages: true
+                 }
+               })
+
+      [request] = plan.requests
+      refute Map.has_key?(request.payload, :can_manage_chat)
+      assert request.payload.can_delete_messages == true
+      assert request.payload.can_invite_users == false
     end
 
     test "plans member tags and sender-chat moderation" do
@@ -112,6 +192,28 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
   end
 
   describe "settings and channel post plans" do
+    test "plans chat setting variants and forum/sticker controls" do
+      for {action, expected_path, params} <- [
+            {"set-title", "/setChatTitle", %{title: "Lux Research"}},
+            {:set_description, "/setChatDescription", %{description: ""}},
+            {:delete_photo, "/deleteChatPhoto", %{}},
+            {:set_slow_mode, "/setChatSlowModeDelay", %{slow_mode_delay: 0}},
+            {:edit_invite_link, "/editChatInviteLink",
+             %{invite_link: "https://t.me/+abc", expire_date: 1_766_000_000}},
+            {:revoke_invite_link, "/revokeChatInviteLink", %{invite_link: "https://t.me/+abc"}},
+            {:pin_message, "/pinChatMessage",
+             %{message_id: @message_id, disable_notification: true}},
+            {:unpin_message, "/unpinChatMessage", %{message_id: @message_id}},
+            {:unpin_all_messages, "/unpinAllChatMessages", %{}},
+            {:set_sticker_set, "/setChatStickerSet", %{sticker_set_name: "lux_stickers"}},
+            {:delete_sticker_set, "/deleteChatStickerSet", %{}},
+            {:set_forum, "/setChatIsForum", %{is_forum: true}}
+          ] do
+        assert {:ok, plan} = GroupManager.plan(action, Map.put(params, :chat_id, @chat_id))
+        assert [%{path: ^expected_path}] = plan.requests
+      end
+    end
+
     test "plans group settings and invite link operations" do
       assert {:ok, title_plan} =
                GroupManager.plan(:set_title, %{chat_id: @chat_id, title: "Lux Research"})
@@ -147,6 +249,50 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
         assert {:ok, plan} = GroupManager.plan(action, Map.put(params, :chat_id, @chat_id))
         assert [%{path: ^expected_path}] = plan.requests
       end
+    end
+
+    test "includes optional payload fields for channel post operations" do
+      assert {:ok, edit_caption} =
+               GroupManager.plan(:edit_channel_caption, %{
+                 chat_id: @chat_id,
+                 message_id: @message_id,
+                 caption: "Updated caption",
+                 parse_mode: "Markdown",
+                 caption_entities: [%{type: "bold", offset: 0, length: 7}],
+                 reply_markup: %{inline_keyboard: []}
+               })
+
+      assert [
+               %{
+                 path: "/editMessageCaption",
+                 payload: %{
+                   parse_mode: "Markdown",
+                   caption_entities: [%{type: "bold", offset: 0, length: 7}],
+                   reply_markup: %{inline_keyboard: []}
+                 }
+               }
+             ] = edit_caption.requests
+
+      assert {:ok, copy_plan} =
+               GroupManager.plan(:copy_channel_post, %{
+                 chat_id: @chat_id,
+                 from_chat_id: -100_555_555,
+                 message_id: @message_id,
+                 message_thread_id: 5,
+                 caption: "Copy caption",
+                 protect_content: true
+               })
+
+      assert [
+               %{
+                 path: "/copyMessage",
+                 payload: %{
+                   message_thread_id: 5,
+                   caption: "Copy caption",
+                   protect_content: true
+                 }
+               }
+             ] = copy_plan.requests
     end
   end
 
@@ -205,6 +351,117 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert plan.violations == []
     end
 
+    test "keeps non-matching patterns and disabled link checks clean" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 text: "Plain update without a match",
+                 policy: %{
+                   blocked_patterns: ["spam"],
+                   block_links: "not-a-boolean",
+                   blocked_terms: 123
+                 }
+               })
+
+      assert plan.status == :clean
+      assert plan.moderation_action == :none
+      assert plan.violations == []
+    end
+
+    test "uses default low severity warning moderation" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 message_id: @message_id,
+                 text: "@alpha_user @bravo_user",
+                 policy: %{
+                   max_mentions: 1,
+                   warning_text: "Please slow down."
+                 }
+               })
+
+      assert plan.severity == :low
+      assert plan.moderation_action == :warn_member
+      assert [%{path: "/sendMessage", payload: payload}] = plan.requests
+      assert payload.text == "Please slow down."
+      assert payload.reply_to_message_id == @message_id
+    end
+
+    test "uses default medium severity deletion moderation" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 message_id: @message_id,
+                 text: "This message is too long",
+                 policy: %{max_length: 5}
+               })
+
+      assert plan.severity == :medium
+      assert plan.moderation_action == :delete_message
+      assert [%{path: "/deleteMessage", payload: %{message_id: @message_id}}] = plan.requests
+      assert [%{type: :length, length: 24, max_length: 5}] = plan.violations
+    end
+
+    test "uses default high severity restriction and falls back to delete-only without user id" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 message_id: @message_id,
+                 text: "Posting too quickly",
+                 recent_message_count: 5,
+                 policy: %{max_recent_messages: 2}
+               })
+
+      assert plan.severity == :high
+      assert plan.moderation_action == :restrict_member
+      assert [%{path: "/deleteMessage"}] = plan.requests
+
+      assert [%{type: :message_rate, recent_message_count: 5, max_recent_messages: 2}] =
+               plan.violations
+    end
+
+    test "supports explicit moderation action strings and ban fallback without a user id" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 message_id: @message_id,
+                 text: "spam.example",
+                 moderation_action: "ban-member",
+                 policy: %{blocked_patterns: ["spam\\.example"]}
+               })
+
+      assert plan.moderation_action == :ban_member
+      assert [%{path: "/deleteMessage"}] = plan.requests
+    end
+
+    test "detects uppercase moderation violations" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 text: "LOUD ANNOUNCEMENT",
+                 policy: %{min_uppercase_length: 5, uppercase_ratio: 0.8}
+               })
+
+      assert plan.severity == :low
+      assert [%{type: :uppercase_ratio, severity: :low}] = plan.violations
+    end
+
+    test "rejects invalid moderation policies and non-string blocked patterns" do
+      assert {:error, "policy must be a map"} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 text: "hello",
+                 policy: "strict"
+               })
+
+      assert {:error, "Invalid blocked pattern 123: expected a string"} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 text: "hello",
+                 policy: %{blocked_patterns: [123]}
+               })
+    end
+
     test "plans standalone admin log delivery" do
       assert {:ok, plan} =
                GroupManager.plan(:log_admin_action, %{
@@ -222,6 +479,30 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert payload.chat_id == -100_999
       assert payload.text =~ "action=manual_review"
       assert payload.text =~ "reason=Escalated for moderator review"
+    end
+
+    test "records admin log aliases without delivery chat" do
+      assert {:ok, plan} =
+               GroupManager.plan(:log_admin_action, %{
+                 admin_action: "permissions_reviewed",
+                 chat_id: @chat_id
+               })
+
+      assert plan.request_count == 0
+      assert plan.requests == []
+      assert plan.audit_entry.action == "permissions_reviewed"
+      assert plan.audit_entry.status == :recorded
+    end
+
+    test "records event aliases and unknown audit actions" do
+      assert {:ok, event_plan} =
+               GroupManager.plan(:log_admin_action, %{event: "join_request_reviewed"})
+
+      assert event_plan.audit_entry.action == "join_request_reviewed"
+
+      recorded = GroupManager.audit_entry(:external_tool_action, %{}, %{})
+      assert recorded.action == ":external_tool_action"
+      assert recorded.status == :recorded
     end
   end
 
@@ -253,6 +534,26 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert executed.executed == true
       assert [%{response: %{"result" => true}}] = executed.results
     end
+
+    test "returns execution failures with request context" do
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(429, Jason.encode!(%{"description" => "Too Many Requests"}))
+      end)
+
+      assert {:ok, plan} =
+               GroupManager.plan(:ban_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id
+               })
+
+      assert {:error, %{plan: ^plan, results: [{:error, failure}]}} =
+               GroupManager.execute(plan, plug: {Req.Test, TelegramClientMock})
+
+      assert failure.request.path == "/banChatMember"
+      assert failure.error == {429, "Too Many Requests"}
+    end
   end
 
   describe "validation" do
@@ -274,6 +575,81 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
                })
 
       assert message =~ "Invalid blocked pattern"
+    end
+
+    test "rejects invalid actions, aliases, and action types" do
+      assert {:error, "Unsupported Telegram group action: :unknown"} =
+               GroupManager.plan(:unknown, %{})
+
+      assert {:error, "Unsupported Telegram group action: \"missing-action\""} =
+               GroupManager.plan("missing-action", %{})
+
+      assert {:error, "Unsupported Telegram group action: %{bad: :action}"} =
+               GroupManager.plan(%{bad: :action}, %{})
+    end
+
+    test "rejects invalid chat settings and message id payloads" do
+      assert {:error, "Missing or invalid chat_id"} =
+               GroupManager.plan(:set_title, %{chat_id: "", title: "Lux"})
+
+      assert {:error, "Missing or invalid chat_id"} =
+               GroupManager.plan(:set_title, %{title: "Lux"})
+
+      assert {:error, "Missing or invalid title"} =
+               GroupManager.plan(:set_title, %{chat_id: @chat_id, title: ""})
+
+      assert {:error, "Missing or invalid is_forum"} =
+               GroupManager.plan(:set_forum, %{chat_id: @chat_id, is_forum: "yes"})
+
+      assert {:error, "message_ids must include between 1 and 100 message ids"} =
+               GroupManager.plan(:delete_messages, %{chat_id: @chat_id, message_ids: []})
+
+      assert {:error, "message_ids must include between 1 and 100 message ids"} =
+               GroupManager.plan(:delete_messages, %{
+                 chat_id: @chat_id,
+                 message_ids: Enum.to_list(1..101)
+               })
+
+      assert {:error, "Missing or invalid message_ids"} =
+               GroupManager.plan(:delete_messages, %{chat_id: @chat_id, message_ids: "1,2"})
+    end
+
+    test "rejects invalid permission and admin flag maps" do
+      assert {:error, "permissions.can_send_messages must be a boolean"} =
+               GroupManager.plan(:set_permissions, %{
+                 chat_id: @chat_id,
+                 permissions: %{can_send_messages: "yes"}
+               })
+
+      assert {:error, "permissions must include at least one supported flag"} =
+               GroupManager.plan(:set_permissions, %{chat_id: @chat_id, permissions: %{}})
+
+      assert {:error, "Unsupported permission template: \"locked\""} =
+               GroupManager.plan(:set_permissions, %{
+                 chat_id: @chat_id,
+                 permission_template: "locked"
+               })
+
+      assert {:error, "admin_rights.can_manage_chat must be a boolean"} =
+               GroupManager.plan(:promote_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 admin_rights: %{can_manage_chat: "yes"}
+               })
+
+      assert {:error, "admin_rights must include at least one supported flag"} =
+               GroupManager.plan(:promote_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 admin_rights: %{}
+               })
+
+      assert {:error, "Unsupported admin template: \"owner\""} =
+               GroupManager.plan(:promote_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 admin_template: "owner"
+               })
     end
   end
 end
