@@ -1,0 +1,71 @@
+# Hyperliquid Perpetual Trading
+
+Lux includes Hyperliquid helpers for public market/account reads, order planning, position
+tracking, margin management, liquidation monitoring, and risk verification.
+
+## Public Info Client
+
+```elixir
+alias Lux.Integrations.Hyperliquid.Client
+
+{:ok, meta} = Client.meta()
+{:ok, mids} = Client.all_mids()
+{:ok, book} = Client.l2_book("ETH")
+{:ok, state} = Client.clearinghouse_state("0x0000000000000000000000000000000000000001")
+{:ok, orders} = Client.open_orders("0x0000000000000000000000000000000000000001")
+```
+
+The client calls Hyperliquid's public `POST /info` endpoint. Trading writes use
+`POST /exchange` and require a signed payload.
+
+## Order Planning
+
+```elixir
+alias Lux.Integrations.Hyperliquid.Perps
+
+{:ok, action} =
+  Perps.order_action(
+    %{
+      coin: "ETH",
+      asset_index: 1,
+      is_buy: true,
+      sz: 0.1,
+      limit_px: 3000,
+      order_type: %{limit: %{tif: "Gtc"}}
+    }
+  )
+```
+
+The returned action is the compact Hyperliquid exchange action shape. It is ready
+for a signer/API-wallet adapter to attach `nonce` and `signature`; the helper does
+not handle private keys or submit live orders.
+
+Cancel, leverage, and isolated margin actions use the same pattern:
+
+```elixir
+Perps.cancel_action(%{coin: "ETH", asset_index: 1, oid: 123})
+Perps.leverage_action(%{coin: "ETH", asset_index: 1, leverage: 3, is_cross: true})
+Perps.margin_action(%{coin: "ETH", asset_index: 1, amount: 100, action: "add"})
+```
+
+## Risk Verification
+
+```elixir
+{:ok, decision} =
+  Perps.risk_check(state, mids, %{
+    coin: "ETH",
+    is_buy: true,
+    sz: 0.1,
+    limit_px: 3000
+  })
+```
+
+Risk checks cover projected leverage, order notional, projected position concentration,
+margin usage, and current liquidation buffers.
+
+## Agent Prisms
+
+`Lux.Prisms.Hyperliquid.HyperliquidOrderManagementPrism` validates and plans order,
+cancel, leverage, and margin actions. `Lux.Prisms.Hyperliquid.HyperliquidPerpsDashboardPrism`
+returns a compact dashboard for current positions, PnL, open orders, margin, and
+liquidation risk.
