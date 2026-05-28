@@ -147,7 +147,22 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
         },
         policy: %{
           type: :object,
-          description: "Content moderation policy"
+          description:
+            "Content moderation policy, including optional rate/window thresholds for recent_messages"
+        },
+        recent_messages: %{
+          type: :array,
+          description:
+            "Optional caller-supplied spam history for the same chat/user, with text and optional age_seconds"
+        },
+        recent_message_count: %{
+          type: :integer,
+          description: "Optional precomputed message count for rate-limit moderation checks"
+        },
+        bot_admin_rights: %{
+          type: :object,
+          description:
+            "Optional map of the bot's Telegram administrator rights used for dry-run preflight"
         },
         log_chat_id: %{
           type: [:string, :integer],
@@ -213,7 +228,8 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
         {:ok,
          plan
          |> Map.put(:planned, true)
-         |> Map.put(:executed, false)}
+         |> Map.put(:executed, false)
+         |> normalize_output()}
       end
     end
   end
@@ -226,12 +242,79 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
         {:ok,
          executed_plan
          |> Map.put(:planned, true)
-         |> Map.put(:executed, true)}
+         |> Map.put(:executed, true)
+         |> normalize_output()}
 
       {:error, %{results: results}} ->
         {:error, "Failed to execute Telegram group action: #{inspect(results)}"}
     end
   end
+
+  defp normalize_output(plan) do
+    plan
+    |> stringify_fields([:action, :category, :status, :moderation_action])
+    |> Map.update(:requests, [], &Enum.map(&1, fn request -> normalize_request(request) end))
+    |> Map.update(:audit_entry, %{}, &normalize_audit_entry/1)
+    |> Map.update(:preflight, %{}, &normalize_preflight/1)
+    |> Map.update(
+      :violations,
+      [],
+      &Enum.map(&1, fn violation -> normalize_violation(violation) end)
+    )
+    |> Map.update(:results, [], &Enum.map(&1, fn result -> normalize_result(result) end))
+  end
+
+  defp normalize_request(request) do
+    stringify_fields(request, [:method, :category, :action])
+  end
+
+  defp normalize_audit_entry(audit_entry) do
+    stringify_fields(audit_entry, [:category, :status])
+  end
+
+  defp normalize_preflight(preflight) do
+    preflight
+    |> stringify_fields([:action])
+    |> stringify_atom_list(:required_rights)
+    |> stringify_atom_list(:missing_rights)
+  end
+
+  defp normalize_violation(violation) do
+    stringify_fields(violation, [:type, :severity])
+  end
+
+  defp normalize_result(%{request: request} = result) do
+    Map.put(result, :request, normalize_request(request))
+  end
+
+  defp normalize_result(result), do: result
+
+  defp stringify_fields(map, fields) when is_map(map) do
+    Enum.reduce(fields, map, fn field, acc ->
+      if Map.has_key?(acc, field) do
+        Map.update!(acc, field, &stringify_atom/1)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp stringify_fields(value, _fields), do: value
+
+  defp stringify_atom_list(map, field) when is_map(map) do
+    if Map.has_key?(map, field) do
+      Map.update!(map, field, fn values ->
+        Enum.map(values, &stringify_atom/1)
+      end)
+    else
+      map
+    end
+  end
+
+  defp stringify_atom_list(value, _field), do: value
+
+  defp stringify_atom(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_atom(value), do: value
 
   defp fetch_action(params) do
     case value(params, :action) do

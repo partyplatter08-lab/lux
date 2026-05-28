@@ -28,8 +28,9 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
 
       assert result.planned == true
       assert result.executed == false
-      assert result.action == :restrict_member
-      assert result.category == :member_management
+      assert result.action == "restrict_member"
+      assert result.category == "member_management"
+      assert result.preflight.required_rights == ["can_restrict_members"]
       assert [%{path: "/restrictChatMember"}] = result.requests
     end
 
@@ -63,6 +64,8 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
       assert result.planned == true
       assert result.executed == true
       assert result.request_count == 1
+      assert result.action == "set_permissions"
+      assert result.category == "permission_management"
       assert [%{response: %{"result" => true}}] = result.results
     end
 
@@ -137,8 +140,8 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
                  @agent_ctx
                )
 
-      assert result.status == :flagged
-      assert result.moderation_action == :ban_member
+      assert result.status == "flagged"
+      assert result.moderation_action == "ban_member"
       assert Enum.map(result.requests, & &1.path) == ["/deleteMessage", "/banChatMember"]
     end
 
@@ -164,6 +167,8 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
       assert Map.has_key?(prism.input_schema.properties, :message_thread_id)
       assert Map.has_key?(prism.input_schema.properties, :icon_custom_emoji_id)
       assert Map.has_key?(prism.input_schema.properties, :execute)
+      assert Map.has_key?(prism.input_schema.properties, :recent_messages)
+      assert Map.has_key?(prism.input_schema.properties, :bot_admin_rights)
       assert Map.has_key?(prism.output_schema.properties, :requests)
       assert Map.has_key?(prism.output_schema.properties, :audit_entry)
 

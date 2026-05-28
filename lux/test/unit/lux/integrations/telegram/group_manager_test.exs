@@ -179,6 +179,26 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert Enum.all?(request.payload.permissions, fn {_key, value} -> value == false end)
     end
 
+    test "builds bot admin rights preflight metadata and blocks known-missing rights" do
+      assert {:ok, required_rights} = GroupManager.required_admin_rights(:restrict_member)
+      assert required_rights == [:can_restrict_members]
+
+      assert {:ok, plan} =
+               GroupManager.plan(:restrict_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 bot_admin_rights: %{can_restrict_members: false}
+               })
+
+      assert plan.preflight.configured == true
+      assert plan.preflight.ok == false
+      assert plan.preflight.missing_rights == [:can_restrict_members]
+
+      assert {:error, %{results: [{:error, failure}]}} = GroupManager.execute(plan)
+      assert failure.request == nil
+      assert failure.error =~ "Missing required Telegram admin rights: can_restrict_members"
+    end
+
     test "plans demotion by clearing all admin rights through promoteChatMember" do
       assert {:ok, plan} =
                GroupManager.plan("demote_member", %{
@@ -385,6 +405,26 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
   end
 
   describe "moderation and audit logging" do
+    test "adds audit log delivery requests for ordinary admin actions" do
+      assert {:ok, plan} =
+               GroupManager.plan(:ban_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 admin_id: 111,
+                 reason: "raid cleanup",
+                 log_chat_id: -100_999
+               })
+
+      assert plan.request_count == 2
+      assert Enum.map(plan.requests, & &1.path) == ["/banChatMember", "/sendMessage"]
+
+      [_, log_request] = plan.requests
+      assert log_request.category == :admin_logging
+      assert log_request.payload.chat_id == -100_999
+      assert log_request.payload.text =~ "action=ban_member"
+      assert log_request.payload.text =~ "reason=raid cleanup"
+    end
+
     test "builds moderation plans with violations, action requests, and audit log requests" do
       assert {:ok, plan} =
                GroupManager.plan(:moderate_message, %{
@@ -423,6 +463,56 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
       assert plan.audit_entry.action == "moderate_message"
       assert plan.audit_entry.status == :flagged
       assert plan.audit_entry.target_user_id == @user_id
+    end
+
+    test "uses caller-supplied spam history for rate, duplicate, and link checks" do
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 text: "visit https://spam.example",
+                 recent_messages: [
+                   %{
+                     chat_id: @chat_id,
+                     user_id: @user_id,
+                     text: "visit https://spam.example",
+                     age_seconds: 10
+                   },
+                   %{
+                     chat_id: @chat_id,
+                     user_id: @user_id,
+                     text: "visit https://spam.example",
+                     age_seconds: 20
+                   },
+                   %{
+                     chat_id: @chat_id,
+                     user_id: @user_id,
+                     text: "old duplicate outside the window",
+                     age_seconds: 120
+                   },
+                   %{
+                     chat_id: @chat_id,
+                     user_id: 999,
+                     text: "visit https://spam.example",
+                     age_seconds: 5
+                   }
+                 ],
+                 policy: %{
+                   max_recent_messages: 1,
+                   duplicate_threshold: 2,
+                   max_recent_links: 2,
+                   window_seconds: 60
+                 }
+               })
+
+      assert Enum.map(plan.violations, & &1.type) == [
+               :message_rate,
+               :duplicate_message,
+               :link_history
+             ]
+
+      assert [%{recent_message_count: 2}, %{recent_duplicate_count: 2}, %{recent_link_count: 2}] =
+               plan.violations
     end
 
     test "returns a clean moderation plan without API requests" do

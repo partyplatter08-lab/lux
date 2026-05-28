@@ -403,9 +403,83 @@ defmodule Lux.Integrations.Telegram.GroupManager do
     }
   }
 
+  @admin_right_requirements %{
+    ban_member: [:can_restrict_members],
+    unban_member: [:can_restrict_members],
+    restrict_member: [:can_restrict_members],
+    promote_member: [:can_promote_members],
+    demote_member: [:can_promote_members],
+    set_admin_title: [:can_promote_members],
+    set_member_tag: [:can_manage_tags],
+    ban_sender_chat: [:can_restrict_members],
+    unban_sender_chat: [:can_restrict_members],
+    get_member: [],
+    get_admins: [],
+    get_member_count: [],
+    set_permissions: [:can_restrict_members],
+    set_title: [:can_change_info],
+    set_description: [:can_change_info],
+    delete_photo: [:can_change_info],
+    set_slow_mode: [:can_restrict_members],
+    create_invite_link: [:can_invite_users],
+    edit_invite_link: [:can_invite_users],
+    revoke_invite_link: [:can_invite_users],
+    approve_join_request: [:can_invite_users],
+    decline_join_request: [:can_invite_users],
+    pin_message: [:can_pin_messages],
+    unpin_message: [:can_pin_messages],
+    unpin_all_messages: [:can_pin_messages],
+    set_sticker_set: [:can_change_info],
+    delete_sticker_set: [:can_change_info],
+    create_forum_topic: [:can_manage_topics],
+    edit_forum_topic: [:can_manage_topics],
+    close_forum_topic: [:can_manage_topics],
+    reopen_forum_topic: [:can_manage_topics],
+    delete_forum_topic: [:can_manage_topics],
+    unpin_all_forum_topic_messages: [:can_manage_topics],
+    edit_general_forum_topic: [:can_manage_topics],
+    close_general_forum_topic: [:can_manage_topics],
+    reopen_general_forum_topic: [:can_manage_topics],
+    hide_general_forum_topic: [:can_manage_topics],
+    unhide_general_forum_topic: [:can_manage_topics],
+    unpin_all_general_forum_topic_messages: [:can_manage_topics],
+    send_channel_post: [:can_post_messages],
+    edit_channel_post: [:can_edit_messages],
+    edit_channel_caption: [:can_edit_messages],
+    delete_channel_post: [:can_delete_messages],
+    delete_messages: [:can_delete_messages],
+    forward_channel_post: [:can_post_messages],
+    copy_channel_post: [:can_post_messages],
+    moderate_message: [:can_delete_messages],
+    log_admin_action: [],
+    warn_member: [],
+    delete_message: [:can_delete_messages]
+  }
+
   @doc "Returns every operation accepted by `plan/2`."
   @spec known_actions() :: [atom()]
   def known_actions, do: @actions
+
+  @doc """
+  Returns the Telegram administrator rights that should be present before executing an action.
+  """
+  @spec required_admin_rights(atom() | String.t()) :: {:ok, [atom()]} | {:error, String.t()}
+  def required_admin_rights(action) do
+    with {:ok, normalized_action} <- normalize_preflight_action(action) do
+      {:ok, Map.get(@admin_right_requirements, normalized_action, [])}
+    end
+  end
+
+  @doc """
+  Builds a preflight summary for a planned action using optional `bot_admin_rights`.
+  """
+  @spec preflight_admin_rights(atom() | String.t(), map()) :: {:ok, map()} | {:error, String.t()}
+  def preflight_admin_rights(action, params \\ %{}) do
+    with {:ok, normalized_action} <- normalize_preflight_action(action),
+         {:ok, required_rights} <- required_admin_rights(normalized_action) do
+      {:ok, build_preflight(normalized_action, required_rights, params)}
+    end
+  end
 
   @doc """
   Returns a named `ChatPermissions` template.
@@ -567,28 +641,12 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   """
   @spec execute(map(), map() | keyword()) :: {:ok, map()} | {:error, map()}
   def execute(%{requests: requests} = plan, opts \\ %{}) when is_list(requests) do
-    opts = normalize_opts(opts)
+    case preflight_execution_error(plan) do
+      {:error, _} = error ->
+        error
 
-    results =
-      Enum.map(requests, fn request ->
-        request_opts =
-          opts
-          |> take_params([:plug, :token])
-          |> Map.put(:json, Map.get(request, :payload, %{}))
-
-        case Client.request(request.method, request.path, request_opts) do
-          {:ok, response} -> {:ok, %{request: request, response: response}}
-          {:error, error} -> {:error, %{request: request, error: error}}
-        end
-      end)
-
-    if Enum.all?(results, &match?({:ok, _}, &1)) do
-      {:ok,
-       plan
-       |> Map.put(:executed, true)
-       |> Map.put(:results, Enum.map(results, fn {:ok, result} -> result end))}
-    else
-      {:error, %{plan: plan, results: results}}
+      :ok ->
+        execute_requests(plan, requests, normalize_opts(opts))
     end
   end
 
@@ -642,15 +700,17 @@ defmodule Lux.Integrations.Telegram.GroupManager do
 
     with {:ok, payload} <- build_payload(action, spec, params) do
       request = request(spec.category, action, spec.path, payload)
+      audit = audit_entry(action, Map.put(params, :category, spec.category), %{planned: true})
+      requests = [request] ++ audit_log_requests(audit, params, params)
 
       {:ok,
        %{
          action: action,
          category: spec.category,
-         request_count: 1,
-         requests: [request],
-         audit_entry:
-           audit_entry(action, Map.put(params, :category, spec.category), %{planned: true})
+         request_count: length(requests),
+         requests: requests,
+         preflight: preflight_admin_rights!(action, params),
+         audit_entry: audit
        }}
     end
   end
@@ -736,6 +796,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
          violations: violations,
          request_count: length(requests),
          requests: requests,
+         preflight: moderation_preflight_admin_rights(moderation_action, params),
          audit_entry: audit
        }}
     end
@@ -761,6 +822,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
        category: :admin_logging,
        request_count: length(requests),
        requests: requests,
+       preflight: preflight_admin_rights!(:log_admin_action, params),
        audit_entry: audit
      }}
   end
@@ -780,6 +842,9 @@ defmodule Lux.Integrations.Telegram.GroupManager do
          uppercase_ratio: value(policy, :uppercase_ratio, 0.85),
          min_uppercase_length: value(policy, :min_uppercase_length, 24),
          max_recent_messages: value(policy, :max_recent_messages),
+         max_recent_links: value(policy, :max_recent_links),
+         duplicate_threshold: value(policy, :duplicate_threshold),
+         window_seconds: value(policy, :window_seconds, 60),
          warning_text:
            value(policy, :warning_text, "Please keep the conversation within the group rules."),
          log_chat_id: value(policy, :log_chat_id) || value(params, :log_chat_id),
@@ -803,7 +868,9 @@ defmodule Lux.Integrations.Telegram.GroupManager do
         |> maybe_add(
           uppercase_violation(text, policy.uppercase_ratio, policy.min_uppercase_length)
         )
-        |> maybe_add(rate_violation(params, policy.max_recent_messages))
+        |> maybe_add(rate_violation(params, policy))
+        |> maybe_add(duplicate_message_violation(text, params, policy))
+        |> maybe_add(link_history_violation(text, params, policy))
 
       {:ok, violations}
     end
@@ -849,7 +916,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   end
 
   defp link_violation(text, true) do
-    if Regex.match?(~r/(https?:\/\/|www\.|t\.me\/|telegram\.me\/)/iu, text) do
+    if contains_link?(text) do
       %{type: :link, severity: :medium}
     end
   end
@@ -923,9 +990,13 @@ defmodule Lux.Integrations.Telegram.GroupManager do
 
   defp uppercase_violation(_text, _ratio, _min_length), do: nil
 
-  defp rate_violation(params, max_recent_messages)
+  defp rate_violation(params, %{max_recent_messages: max_recent_messages} = policy)
        when is_integer(max_recent_messages) and max_recent_messages >= 0 do
-    recent_count = value(params, :recent_message_count, 0)
+    recent_count =
+      case value(params, :recent_message_count) do
+        count when is_integer(count) -> count
+        _ -> recent_messages(params, policy) |> length()
+      end
 
     if is_integer(recent_count) and recent_count > max_recent_messages do
       %{
@@ -937,7 +1008,105 @@ defmodule Lux.Integrations.Telegram.GroupManager do
     end
   end
 
-  defp rate_violation(_params, _max_recent_messages), do: nil
+  defp rate_violation(_params, _policy), do: nil
+
+  defp duplicate_message_violation(text, params, %{duplicate_threshold: threshold} = policy)
+       when is_integer(threshold) and threshold > 0 do
+    normalized_text = normalize_message_text(text)
+
+    recent_duplicate_count =
+      params
+      |> recent_messages(policy)
+      |> Enum.count(fn message ->
+        normalize_message_text(value(message, :text, "")) == normalized_text
+      end)
+
+    if normalized_text != "" and recent_duplicate_count + 1 > threshold do
+      %{
+        type: :duplicate_message,
+        recent_duplicate_count: recent_duplicate_count,
+        duplicate_threshold: threshold,
+        severity: :medium
+      }
+    end
+  end
+
+  defp duplicate_message_violation(_text, _params, _policy), do: nil
+
+  defp link_history_violation(text, params, %{max_recent_links: max_recent_links} = policy)
+       when is_integer(max_recent_links) and max_recent_links >= 0 do
+    recent_link_count =
+      params
+      |> recent_messages(policy)
+      |> Enum.count(fn message -> contains_link?(value(message, :text, "")) end)
+
+    link_count =
+      if contains_link?(text) do
+        recent_link_count + 1
+      else
+        recent_link_count
+      end
+
+    if link_count > max_recent_links do
+      %{
+        type: :link_history,
+        recent_link_count: recent_link_count,
+        max_recent_links: max_recent_links,
+        severity: :medium
+      }
+    end
+  end
+
+  defp link_history_violation(_text, _params, _policy), do: nil
+
+  defp recent_messages(params, policy) do
+    params
+    |> list_value(:recent_messages)
+    |> Enum.filter(fn message ->
+      is_map(message) and
+        message_matches_context?(message, params) and
+        message_in_window?(message, policy.window_seconds)
+    end)
+  end
+
+  defp message_matches_context?(message, params) do
+    context_value_matches?(message, params, :chat_id) and
+      context_value_matches?(message, params, :user_id)
+  end
+
+  defp context_value_matches?(message, params, key) do
+    case {fetch_value(message, key), fetch_value(params, key)} do
+      {{:ok, left}, {:ok, right}} -> left == right
+      _ -> true
+    end
+  end
+
+  defp message_in_window?(message, window_seconds)
+       when is_integer(window_seconds) and window_seconds >= 0 do
+    case value(message, :age_seconds) do
+      age_seconds when is_integer(age_seconds) and age_seconds >= 0 ->
+        age_seconds <= window_seconds
+
+      _ ->
+        true
+    end
+  end
+
+  defp message_in_window?(_message, _window_seconds), do: true
+
+  defp normalize_message_text(text) when is_binary(text) do
+    text
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_message_text(_text), do: ""
+
+  defp contains_link?(text) when is_binary(text) do
+    Regex.match?(~r/(https?:\/\/|www\.|t\.me\/|telegram\.me\/)/iu, text)
+  end
+
+  defp contains_link?(_text), do: false
 
   defp moderation_severity([]), do: :none
 
@@ -1230,6 +1399,19 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   defp normalize_action(action),
     do: {:error, "Unsupported Telegram group action: #{inspect(action)}"}
 
+  defp normalize_preflight_action(action) do
+    case normalize_action(action) do
+      {:ok, normalized} ->
+        {:ok, normalized}
+
+      {:error, _reason} ->
+        case normalize_moderation_action(action) do
+          {:ok, normalized} -> {:ok, normalized}
+          :error -> {:error, "Unsupported Telegram group action: #{inspect(action)}"}
+        end
+    end
+  end
+
   defp normalize_action_name(action) do
     case normalize_action(action) do
       {:ok, normalized} -> Atom.to_string(normalized)
@@ -1289,6 +1471,93 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   end
 
   defp normalize_moderation_action(_action), do: :error
+
+  defp preflight_admin_rights!(action, params) do
+    {:ok, preflight} = preflight_admin_rights(action, params)
+    preflight
+  end
+
+  defp moderation_preflight_admin_rights(:restrict_member, params) do
+    build_preflight(:restrict_member, [:can_delete_messages, :can_restrict_members], params)
+  end
+
+  defp moderation_preflight_admin_rights(:ban_member, params) do
+    build_preflight(:ban_member, [:can_delete_messages, :can_restrict_members], params)
+  end
+
+  defp moderation_preflight_admin_rights(action, params) do
+    preflight_admin_rights!(action, params)
+  end
+
+  defp build_preflight(action, required_rights, params) do
+    required_rights = Enum.uniq(required_rights)
+    available_rights = value(params, :bot_admin_rights)
+    configured = is_map(available_rights)
+
+    missing_rights =
+      if configured do
+        Enum.reject(required_rights, &right_enabled?(available_rights, &1))
+      else
+        []
+      end
+
+    %{
+      action: action,
+      required_rights: required_rights,
+      configured: configured,
+      ok: missing_rights == [],
+      missing_rights: missing_rights
+    }
+  end
+
+  defp right_enabled?(rights, right) do
+    case fetch_value(rights, right) do
+      {:ok, true} -> true
+      _ -> false
+    end
+  end
+
+  defp execute_requests(plan, requests, opts) do
+    results =
+      Enum.map(requests, fn request ->
+        request_opts =
+          opts
+          |> take_params([:plug, :token])
+          |> Map.put(:json, Map.get(request, :payload, %{}))
+
+        case Client.request(request.method, request.path, request_opts) do
+          {:ok, response} -> {:ok, %{request: request, response: response}}
+          {:error, error} -> {:error, %{request: request, error: error}}
+        end
+      end)
+
+    if Enum.all?(results, &match?({:ok, _}, &1)) do
+      {:ok,
+       plan
+       |> Map.put(:executed, true)
+       |> Map.put(:results, Enum.map(results, fn {:ok, result} -> result end))}
+    else
+      {:error, %{plan: plan, results: results}}
+    end
+  end
+
+  defp preflight_execution_error(%{preflight: %{configured: true, ok: false} = preflight} = plan) do
+    missing = Enum.map_join(Map.fetch!(preflight, :missing_rights), ", ", &Atom.to_string/1)
+
+    {:error,
+     %{
+       plan: plan,
+       results: [
+         {:error,
+          %{
+            request: nil,
+            error: "Missing required Telegram admin rights: #{missing}"
+          }}
+       ]
+     }}
+  end
+
+  defp preflight_execution_error(_plan), do: :ok
 
   defp take_params(params, keys) do
     Enum.reduce(keys, %{}, fn key, acc ->

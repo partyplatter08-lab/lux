@@ -266,6 +266,15 @@ Bulk deletes, sender-chat bans, member tags, forum topic controls, and
 standalone audit-log messages are also available through the same `action`
 field.
 
+When a moderation policy uses spam thresholds, pass either a precomputed
+`recent_message_count` or a `recent_messages` list scoped to the current
+chat/user. Each recent message may include `text`, `chat_id`, `user_id`, and
+optional `age_seconds`; `window_seconds`, `duplicate_threshold`, and
+`max_recent_links` let agents detect per-window floods, repeated text, and
+link-heavy bursts. For live execution, `bot_admin_rights` can be supplied to
+surface a preflight summary of required Telegram administrator permissions.
+Any action with `log_chat_id` also appends an admin audit delivery request.
+
 ```elixir
 {:ok, moderation} =
   ManageGroup.handler(
@@ -277,17 +286,30 @@ field.
       text: "Join https://spam.example now",
       moderation_action: :restrict_member,
       log_chat_id: -100_999,
+      bot_admin_rights: %{can_delete_messages: true, can_restrict_members: true},
+      recent_messages: [
+        %{
+          chat_id: -100_123_456,
+          user_id: 987_654,
+          text: "Join https://spam.example",
+          age_seconds: 12
+        }
+      ],
       policy: %{
         blocked_terms: ["free money"],
         blocked_patterns: ["spam\\.example"],
         block_links: true,
-        max_recent_messages: 5
+        max_recent_messages: 5,
+        duplicate_threshold: 2,
+        max_recent_links: 3,
+        window_seconds: 60
       }
     },
     %{name: "Moderator Bot"}
   )
 
 moderation.violations
+moderation.preflight
 moderation.audit_entry
 ```
 
