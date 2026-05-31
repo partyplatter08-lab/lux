@@ -168,6 +168,18 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
           type: [:string, :integer],
           description: "Optional chat/channel id that receives admin audit log messages"
         },
+        token: %{
+          type: :string,
+          description:
+            "Optional Telegram bot token used to authenticate execution. When omitted, the " <>
+              "configured Lux.Integrations.Telegram.Client credentials are used instead."
+        },
+        allow_unverified_admin_rights: %{
+          type: :boolean,
+          description:
+            "When true, permits executing destructive actions (ban/restrict/promote/delete) " <>
+              "without verified bot_admin_rights, bypassing the admin-rights safety gate"
+        },
         plug: %{
           type: :object,
           description: "Optional Req.Test plug configuration for local tests"
@@ -202,6 +214,38 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
           type: :array,
           description: "Planned Telegram Bot API request maps"
         },
+        status: %{
+          type: :string,
+          description: "Moderation outcome for moderate_message plans (clean or flagged)"
+        },
+        severity: %{
+          type: :string,
+          description: "Highest moderation violation severity (none, low, medium, or high)"
+        },
+        moderation_action: %{
+          type: :string,
+          description: "Resolved moderation action for moderate_message plans"
+        },
+        violations: %{
+          type: :array,
+          description: "Normalized moderation violations detected in the evaluated content"
+        },
+        preflight: %{
+          type: :object,
+          description:
+            "Admin-rights preflight summary, including required_rights, configured, destructive, " <>
+              "verified, ok, and missing_rights"
+        },
+        warnings: %{
+          type: :array,
+          description:
+            "Human-readable safety warnings, e.g. unverified destructive rights or sticker-set " <>
+              "capability caveats"
+        },
+        results: %{
+          type: :array,
+          description: "Per-request execution results returned when execute is true"
+        },
         audit_entry: %{
           type: :object,
           description: "Normalized admin audit entry for the action"
@@ -235,7 +279,7 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
   end
 
   defp execute_plan(plan, params) do
-    execute_opts = take_params(params, [:plug, :token])
+    execute_opts = take_params(params, [:plug, :token, :allow_unverified_admin_rights])
 
     case GroupManager.execute(plan, execute_opts) do
       {:ok, executed_plan} ->
@@ -252,7 +296,7 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroup do
 
   defp normalize_output(plan) do
     plan
-    |> stringify_fields([:action, :category, :status, :moderation_action])
+    |> stringify_fields([:action, :category, :status, :severity, :moderation_action])
     |> Map.update(:requests, [], &Enum.map(&1, fn request -> normalize_request(request) end))
     |> Map.update(:audit_entry, %{}, &normalize_audit_entry/1)
     |> Map.update(:preflight, %{}, &normalize_preflight/1)

@@ -56,6 +56,7 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
                    action: :set_permissions,
                    chat_id: @chat_id,
                    permission_template: :no_links,
+                   bot_admin_rights: %{can_restrict_members: true},
                    execute: true
                  },
                  @agent_ctx
@@ -90,6 +91,7 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
                    chat_id: @chat_id,
                    user_id: @user_id,
                    only_if_banned: true,
+                   allow_unverified_admin_rights: true,
                    execute: "1",
                    plug: nil
                  },
@@ -116,7 +118,8 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
                    chat_id: @chat_id,
                    user_id: @user_id,
                    execute: true,
-                   token: "test-token"
+                   token: "test-token",
+                   allow_unverified_admin_rights: true
                  },
                  @agent_ctx
                )
@@ -169,11 +172,58 @@ defmodule Lux.Prisms.Telegram.Group.ManageGroupTest do
       assert Map.has_key?(prism.input_schema.properties, :execute)
       assert Map.has_key?(prism.input_schema.properties, :recent_messages)
       assert Map.has_key?(prism.input_schema.properties, :bot_admin_rights)
+      assert Map.has_key?(prism.input_schema.properties, :token)
+      assert Map.has_key?(prism.input_schema.properties, :allow_unverified_admin_rights)
       assert Map.has_key?(prism.output_schema.properties, :requests)
       assert Map.has_key?(prism.output_schema.properties, :audit_entry)
 
+      # Every field produced by normalize_output/1 must be advertised so agents
+      # can rely on the documented contract for moderation and execution output.
+      for field <- [
+            :status,
+            :severity,
+            :moderation_action,
+            :violations,
+            :preflight,
+            :warnings,
+            :results
+          ] do
+        assert Map.has_key?(prism.output_schema.properties, field),
+               "output_schema is missing advertised field #{inspect(field)}"
+      end
+
       assert MapSet.new(prism.input_schema.properties.action.enum) ==
                MapSet.new(Enum.map(GroupManager.known_actions(), &Atom.to_string/1))
+    end
+  end
+
+  describe "preflight and execution safety" do
+    test "dry-run output surfaces the preflight summary and unverified-rights warning" do
+      assert {:ok, result} =
+               ManageGroup.handler(
+                 %{action: :ban_member, chat_id: @chat_id, user_id: @user_id},
+                 @agent_ctx
+               )
+
+      assert result.executed == false
+      assert result.preflight.action == "ban_member"
+      assert result.preflight.required_rights == ["can_restrict_members"]
+      assert result.preflight.destructive == true
+      assert result.preflight.verified == false
+      assert [warning] = result.warnings
+      assert warning =~ "unverified bot admin rights"
+    end
+
+    test "blocks destructive execution without verified rights or an explicit opt-out" do
+      # No Req.Test expectation: the safety gate must reject before any request.
+      assert {:error, message} =
+               ManageGroup.handler(
+                 %{action: :ban_member, chat_id: @chat_id, user_id: @user_id, execute: true},
+                 @agent_ctx
+               )
+
+      assert message =~ "Failed to execute Telegram group action"
+      assert message =~ "without verified bot_admin_rights"
     end
   end
 end

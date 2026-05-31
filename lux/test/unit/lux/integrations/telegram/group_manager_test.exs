@@ -705,8 +705,12 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
                GroupManager.plan(:ban_member, %{
                  chat_id: @chat_id,
                  user_id: @user_id,
-                 revoke_messages: true
+                 revoke_messages: true,
+                 bot_admin_rights: %{can_restrict_members: true}
                })
+
+      assert plan.preflight.verified == true
+      assert plan.warnings == []
 
       assert {:ok, executed} = GroupManager.execute(plan)
       assert executed.executed == true
@@ -727,10 +731,263 @@ defmodule Lux.Integrations.Telegram.GroupManagerTest do
                })
 
       assert {:error, %{plan: ^plan, results: [{:error, failure}]}} =
-               GroupManager.execute(plan, plug: {Req.Test, TelegramClientMock})
+               GroupManager.execute(plan,
+                 plug: {Req.Test, TelegramClientMock},
+                 allow_unverified_admin_rights: true
+               )
 
       assert failure.request.path == "/banChatMember"
       assert failure.error == {429, "Too Many Requests"}
+    end
+  end
+
+  describe "admin rights safety gate" do
+    test "marks destructive actions and blocks execution when rights are unverified" do
+      assert {:ok, plan} =
+               GroupManager.plan(:ban_member, %{chat_id: @chat_id, user_id: @user_id})
+
+      assert plan.preflight.destructive == true
+      assert plan.preflight.verified == false
+      assert plan.preflight.configured == false
+
+      assert [warning] = plan.warnings
+      assert warning =~ "unverified bot admin rights"
+
+      # No Req.Test expectation is registered: the gate must block before any
+      # HTTP request is attempted.
+      assert {:error, %{plan: ^plan, results: [{:error, failure}]}} = GroupManager.execute(plan)
+      assert failure.request == nil
+      assert failure.error =~ "Refusing to execute destructive Telegram action ban_member"
+      assert failure.error =~ "without verified bot_admin_rights"
+    end
+
+    test "allows destructive execution with an explicit allow_unverified_admin_rights opt-out" do
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        assert conn.request_path =~ "/restrictChatMember"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true, "result" => true}))
+      end)
+
+      assert {:ok, plan} =
+               GroupManager.plan(:restrict_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 permission_template: :read_only
+               })
+
+      assert {:ok, executed} = GroupManager.execute(plan, allow_unverified_admin_rights: true)
+      assert executed.executed == true
+      assert [%{request: %{path: "/restrictChatMember"}}] = executed.results
+    end
+
+    test "executes destructive actions when bot_admin_rights verify the required rights" do
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        assert conn.request_path =~ "/banChatMember"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true, "result" => true}))
+      end)
+
+      assert {:ok, plan} =
+               GroupManager.plan(:ban_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 bot_admin_rights: %{can_restrict_members: true}
+               })
+
+      assert plan.preflight.verified == true
+      assert plan.warnings == []
+      assert {:ok, executed} = GroupManager.execute(plan)
+      assert executed.executed == true
+    end
+
+    test "non-destructive actions execute without bot_admin_rights" do
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        assert conn.request_path =~ "/setChatTitle"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true, "result" => true}))
+      end)
+
+      assert {:ok, plan} = GroupManager.plan(:set_title, %{chat_id: @chat_id, title: "Lux"})
+      assert plan.preflight.destructive == false
+      assert plan.warnings == []
+      assert {:ok, executed} = GroupManager.execute(plan)
+      assert executed.executed == true
+    end
+  end
+
+  describe "execution short-circuits on failure" do
+    test "stops after the first failed request and never delivers the audit log" do
+      # The plan is [deleteMessage, restrictChatMember, sendMessage(audit log)].
+      # Only one HTTP call is allowed; if the executor continued past the failed
+      # delete it would attempt the restrict and the audit-log send, both of
+      # which would raise as unexpected Req.Test requests.
+      Req.Test.expect(TelegramClientMock, fn conn ->
+        assert conn.request_path =~ "/deleteMessage"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(500, Jason.encode!(%{"description" => "Internal Server Error"}))
+      end)
+
+      assert {:ok, plan} =
+               GroupManager.plan(:moderate_message, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 message_id: @message_id,
+                 text: "spam http://bad.example",
+                 moderation_action: :restrict_member,
+                 log_chat_id: -100_999,
+                 bot_admin_rights: %{can_delete_messages: true, can_restrict_members: true},
+                 policy: %{block_links: true}
+               })
+
+      assert Enum.map(plan.requests, & &1.path) == [
+               "/deleteMessage",
+               "/restrictChatMember",
+               "/sendMessage"
+             ]
+
+      assert {:error, %{plan: ^plan, results: results}} = GroupManager.execute(plan)
+      assert [{:error, failure}] = results
+      assert failure.request.path == "/deleteMessage"
+      assert failure.error == {500, "Internal Server Error"}
+      refute Enum.any?(results, &match?({:ok, _}, &1))
+    end
+
+    test "delivers every request, including the audit log, when all succeed" do
+      Req.Test.expect(TelegramClientMock, 2, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true, "result" => true}))
+      end)
+
+      assert {:ok, plan} =
+               GroupManager.plan(:ban_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 log_chat_id: -100_999,
+                 bot_admin_rights: %{can_restrict_members: true}
+               })
+
+      assert Enum.map(plan.requests, & &1.path) == ["/banChatMember", "/sendMessage"]
+      assert {:ok, executed} = GroupManager.execute(plan)
+      assert Enum.map(executed.results, & &1.request.path) == ["/banChatMember", "/sendMessage"]
+    end
+  end
+
+  describe "sticker set capability" do
+    test "warns that sticker-set actions may need the can_set_sticker_set capability" do
+      for action <- [:set_sticker_set, :delete_sticker_set] do
+        params =
+          %{chat_id: @chat_id}
+          |> Map.merge(if action == :set_sticker_set, do: %{sticker_set_name: "lux"}, else: %{})
+
+        assert {:ok, plan} = GroupManager.plan(action, params)
+        assert Enum.any?(plan.warnings, &(&1 =~ "can_set_sticker_set"))
+        assert Enum.any?(plan.warnings, &(&1 =~ "getChat"))
+      end
+    end
+  end
+
+  describe "member management workflows" do
+    test "maps add, remove, and restrict member acceptance criteria to Bot API actions" do
+      # "Add" a member: invite-link / join-request approval semantics, since the
+      # Telegram Bot API cannot force-add an arbitrary user to a chat.
+      assert {:ok, invite_plan} =
+               GroupManager.plan(:create_invite_link, %{
+                 chat_id: @chat_id,
+                 creates_join_request: true
+               })
+
+      assert [%{path: "/createChatInviteLink", payload: %{creates_join_request: true}}] =
+               invite_plan.requests
+
+      assert {:ok, approve_plan} =
+               GroupManager.plan(:approve_join_request, %{chat_id: @chat_id, user_id: @user_id})
+
+      assert [%{path: "/approveChatJoinRequest"}] = approve_plan.requests
+
+      # "Remove" a member: ban / unban.
+      assert {:ok, ban_plan} =
+               GroupManager.plan(:ban_member, %{chat_id: @chat_id, user_id: @user_id})
+
+      assert [%{path: "/banChatMember"}] = ban_plan.requests
+
+      assert {:ok, unban_plan} =
+               GroupManager.plan(:unban_member, %{chat_id: @chat_id, user_id: @user_id})
+
+      assert [%{path: "/unbanChatMember"}] = unban_plan.requests
+
+      # "Restrict" a member: restrictChatMember with a permission template.
+      assert {:ok, restrict_plan} =
+               GroupManager.plan(:restrict_member, %{
+                 chat_id: @chat_id,
+                 user_id: @user_id,
+                 permission_template: :read_only
+               })
+
+      assert [%{path: "/restrictChatMember"}] = restrict_plan.requests
+    end
+  end
+
+  describe "moderation performance and bulk limits" do
+    test "evaluates large recent_messages windows correctly and within a generous bound" do
+      recent_messages =
+        for index <- 1..5_000 do
+          %{
+            chat_id: @chat_id,
+            user_id: @user_id,
+            text: "join https://spam.example",
+            age_seconds: rem(index, 50)
+          }
+        end
+
+      {elapsed_us, {:ok, plan}} =
+        :timer.tc(fn ->
+          GroupManager.plan(:moderate_message, %{
+            chat_id: @chat_id,
+            user_id: @user_id,
+            text: "join https://spam.example",
+            recent_messages: recent_messages,
+            policy: %{
+              max_recent_messages: 10,
+              duplicate_threshold: 5,
+              max_recent_links: 5,
+              window_seconds: 60
+            }
+          })
+        end)
+
+      by_type = Map.new(plan.violations, &{&1.type, &1})
+
+      assert by_type[:message_rate].recent_message_count == 5_000
+      assert by_type[:duplicate_message].recent_duplicate_count == 5_000
+      assert by_type[:link_history].recent_link_count == 5_000
+
+      # 5k messages evaluate in well under this generous ceiling; the assertion
+      # is a regression guard against accidental super-linear scanning.
+      assert elapsed_us < 2_000_000
+    end
+
+    test "accepts bulk deletes at the 100-message Bot API boundary" do
+      message_ids = Enum.to_list(1..100)
+
+      assert {:ok, plan} =
+               GroupManager.plan(:delete_messages, %{
+                 chat_id: @chat_id,
+                 message_ids: message_ids
+               })
+
+      assert [%{path: "/deleteMessages", payload: %{message_ids: ^message_ids}}] = plan.requests
+
+      assert length(plan.requests |> hd() |> Map.fetch!(:payload) |> Map.fetch!(:message_ids)) ==
+               100
     end
   end
 

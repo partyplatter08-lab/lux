@@ -313,6 +313,60 @@ moderation.preflight
 moderation.audit_entry
 ```
 
+#### Member Management: Add, Remove, And Restrict
+
+The Telegram Bot API cannot force-add an arbitrary user to a chat, so the
+"add member" acceptance criterion maps to invite-link and join-request
+approval workflows. The three member-management outcomes resolve to these
+actions:
+
+* **Add** – `:create_invite_link` (optionally with `creates_join_request: true`)
+  to issue an invite, then `:approve_join_request` (or `:decline_join_request`)
+  to admit users who request to join.
+* **Remove** – `:ban_member` to remove a user (and `:unban_member` to reverse it).
+* **Restrict** – `:restrict_member` with a `permission_template` such as
+  `:read_only` or explicit `permissions`.
+
+#### Execution Authentication
+
+Execution authenticates through `Lux.Integrations.Telegram.Client`. By default
+the client uses the bot token configured for your application; pass an explicit
+`token` only when you need to override it per call:
+
+```elixir
+ManageGroup.handler(
+  %{
+    action: :ban_member,
+    chat_id: -100_123_456,
+    user_id: 987_654,
+    token: System.fetch_env!("TELEGRAM_BOT_TOKEN"),
+    bot_admin_rights: %{can_restrict_members: true},
+    execute: true
+  },
+  %{name: "Moderator Bot"}
+)
+```
+
+#### Destructive Action Safety Gate
+
+Destructive actions (ban, restrict, promote/demote, and delete paths) keep
+their dry-run safety in live mode. Before executing one, supply
+`bot_admin_rights` confirming the required permissions are present. If those
+rights are absent or unverified, execution is **blocked** and the plan carries
+a `warnings` entry explaining why. To execute anyway when the bot's rights are
+guaranteed out of band (for example via the configured client), pass
+`allow_unverified_admin_rights: true`. The `preflight` map reports
+`destructive`, `verified`, `required_rights`, and `missing_rights` so agents can
+reason about safety before acting.
+
+> #### Sticker set capability {: .warning}
+>
+> `:set_sticker_set` and `:delete_sticker_set` also depend on the chat-level
+> `can_set_sticker_set` capability, which is only observable through `getChat`
+> and is **not** part of `bot_admin_rights`. The plan surfaces a `warnings`
+> entry for these actions; verify the capability with `getChat` before live
+> execution.
+
 ## Advanced Usage
 
 ### Formatting Options

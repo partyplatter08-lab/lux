@@ -456,6 +456,15 @@ defmodule Lux.Integrations.Telegram.GroupManager do
     delete_message: [:can_delete_messages]
   }
 
+  # Admin rights whose presence we insist on verifying before executing a
+  # destructive operation (ban/restrict/promote/delete paths). When none of
+  # these are required, an action is treated as non-destructive.
+  @destructive_rights [:can_restrict_members, :can_promote_members, :can_delete_messages]
+
+  # Actions whose Telegram permission model is not fully captured by chat
+  # administrator rights and therefore warrant an explicit capability note.
+  @sticker_set_actions [:set_sticker_set, :delete_sticker_set]
+
   @doc "Returns every operation accepted by `plan/2`."
   @spec known_actions() :: [atom()]
   def known_actions, do: @actions
@@ -641,12 +650,14 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   """
   @spec execute(map(), map() | keyword()) :: {:ok, map()} | {:error, map()}
   def execute(%{requests: requests} = plan, opts \\ %{}) when is_list(requests) do
-    case preflight_execution_error(plan) do
+    normalized_opts = normalize_opts(opts)
+
+    case preflight_execution_error(plan, normalized_opts) do
       {:error, _} = error ->
         error
 
       :ok ->
-        execute_requests(plan, requests, normalize_opts(opts))
+        execute_requests(plan, requests, normalized_opts)
     end
   end
 
@@ -702,6 +713,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
       request = request(spec.category, action, spec.path, payload)
       audit = audit_entry(action, Map.put(params, :category, spec.category), %{planned: true})
       requests = [request] ++ audit_log_requests(audit, params, params)
+      preflight = preflight_admin_rights!(action, params)
 
       {:ok,
        %{
@@ -709,7 +721,8 @@ defmodule Lux.Integrations.Telegram.GroupManager do
          category: spec.category,
          request_count: length(requests),
          requests: requests,
-         preflight: preflight_admin_rights!(action, params),
+         preflight: preflight,
+         warnings: build_warnings(preflight),
          audit_entry: audit
        }}
     end
@@ -785,6 +798,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
         )
 
       requests = base_requests ++ audit_log_requests(audit, params, policy)
+      preflight = moderation_preflight_admin_rights(moderation_action, params)
 
       {:ok,
        %{
@@ -796,7 +810,8 @@ defmodule Lux.Integrations.Telegram.GroupManager do
          violations: violations,
          request_count: length(requests),
          requests: requests,
-         preflight: moderation_preflight_admin_rights(moderation_action, params),
+         preflight: preflight,
+         warnings: build_warnings(preflight),
          audit_entry: audit
        }}
     end
@@ -815,6 +830,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
       |> Map.put(:category, :admin_logging)
 
     requests = audit_log_requests(audit, params, params)
+    preflight = preflight_admin_rights!(:log_admin_action, params)
 
     {:ok,
      %{
@@ -822,7 +838,8 @@ defmodule Lux.Integrations.Telegram.GroupManager do
        category: :admin_logging,
        request_count: length(requests),
        requests: requests,
-       preflight: preflight_admin_rights!(:log_admin_action, params),
+       preflight: preflight,
+       warnings: build_warnings(preflight),
        audit_entry: audit
      }}
   end
@@ -1493,6 +1510,7 @@ defmodule Lux.Integrations.Telegram.GroupManager do
     required_rights = Enum.uniq(required_rights)
     available_rights = value(params, :bot_admin_rights)
     configured = is_map(available_rights)
+    destructive? = Enum.any?(required_rights, &(&1 in @destructive_rights))
 
     missing_rights =
       if configured do
@@ -1505,10 +1523,39 @@ defmodule Lux.Integrations.Telegram.GroupManager do
       action: action,
       required_rights: required_rights,
       configured: configured,
+      destructive: destructive?,
+      # `verified` is only true when the caller supplied bot_admin_rights AND
+      # every required right is present. It stays false when rights are absent,
+      # so destructive execution cannot silently proceed unverified.
+      verified: configured and missing_rights == [],
       ok: missing_rights == [],
       missing_rights: missing_rights
     }
   end
+
+  defp build_warnings(preflight) do
+    []
+    |> maybe_add(unverified_admin_warning(preflight))
+    |> maybe_add(sticker_set_warning(Map.get(preflight, :action)))
+  end
+
+  defp unverified_admin_warning(%{destructive: true, verified: false} = preflight) do
+    rights = Enum.map_join(Map.get(preflight, :required_rights, []), ", ", &Atom.to_string/1)
+
+    "Destructive action #{Map.get(preflight, :action)} has unverified bot admin rights " <>
+      "(#{rights}). Execution is blocked unless bot_admin_rights confirm these rights or " <>
+      "allow_unverified_admin_rights: true is passed."
+  end
+
+  defp unverified_admin_warning(_preflight), do: nil
+
+  defp sticker_set_warning(action) when action in @sticker_set_actions do
+    "#{action} may also require the chat-level can_set_sticker_set capability, which is only " <>
+      "observable through getChat and is not part of bot_admin_rights. Verify it before live " <>
+      "execution."
+  end
+
+  defp sticker_set_warning(_action), do: nil
 
   defp right_enabled?(rights, right) do
     case fetch_value(rights, right) do
@@ -1518,46 +1565,69 @@ defmodule Lux.Integrations.Telegram.GroupManager do
   end
 
   defp execute_requests(plan, requests, opts) do
-    results =
-      Enum.map(requests, fn request ->
-        request_opts =
-          opts
-          |> take_params([:plug, :token])
-          |> Map.put(:json, Map.get(request, :payload, %{}))
+    base_opts = take_params(opts, [:plug, :token])
+
+    # Execute requests in order and stop at the first failure so a partial
+    # plan (e.g. delete + ban + audit log) cannot deliver a later audit-log
+    # message implying the earlier destructive request succeeded.
+    {results, halted?} =
+      Enum.reduce_while(requests, {[], false}, fn request, {acc, _halted?} ->
+        request_opts = Map.put(base_opts, :json, Map.get(request, :payload, %{}))
 
         case Client.request(request.method, request.path, request_opts) do
-          {:ok, response} -> {:ok, %{request: request, response: response}}
-          {:error, error} -> {:error, %{request: request, error: error}}
+          {:ok, response} ->
+            {:cont, {acc ++ [{:ok, %{request: request, response: response}}], false}}
+
+          {:error, error} ->
+            {:halt, {acc ++ [{:error, %{request: request, error: error}}], true}}
         end
       end)
 
-    if Enum.all?(results, &match?({:ok, _}, &1)) do
+    if halted? do
+      {:error, %{plan: plan, results: results}}
+    else
       {:ok,
        plan
        |> Map.put(:executed, true)
        |> Map.put(:results, Enum.map(results, fn {:ok, result} -> result end))}
-    else
-      {:error, %{plan: plan, results: results}}
     end
   end
 
-  defp preflight_execution_error(%{preflight: %{configured: true, ok: false} = preflight} = plan) do
-    missing = Enum.map_join(Map.fetch!(preflight, :missing_rights), ", ", &Atom.to_string/1)
+  defp preflight_execution_error(%{preflight: preflight} = plan, opts) when is_map(preflight) do
+    cond do
+      Map.get(preflight, :configured) and not Map.get(preflight, :ok, true) ->
+        missing = Enum.map_join(Map.get(preflight, :missing_rights, []), ", ", &Atom.to_string/1)
+        execution_block(plan, "Missing required Telegram admin rights: #{missing}")
 
-    {:error,
-     %{
-       plan: plan,
-       results: [
-         {:error,
-          %{
-            request: nil,
-            error: "Missing required Telegram admin rights: #{missing}"
-          }}
-       ]
-     }}
+      Map.get(preflight, :destructive) and not Map.get(preflight, :verified) and
+          not allow_unverified_admin_rights?(opts) ->
+        required =
+          Enum.map_join(Map.get(preflight, :required_rights, []), ", ", &Atom.to_string/1)
+
+        execution_block(
+          plan,
+          "Refusing to execute destructive Telegram action " <>
+            "#{Map.get(preflight, :action)} without verified bot_admin_rights. Provide " <>
+            "bot_admin_rights confirming #{required} or pass allow_unverified_admin_rights: true."
+        )
+
+      true ->
+        :ok
+    end
   end
 
-  defp preflight_execution_error(_plan), do: :ok
+  defp preflight_execution_error(_plan, _opts), do: :ok
+
+  defp execution_block(plan, message) do
+    {:error, %{plan: plan, results: [{:error, %{request: nil, error: message}}]}}
+  end
+
+  defp allow_unverified_admin_rights?(opts) do
+    case fetch_value(opts, :allow_unverified_admin_rights) do
+      {:ok, value} -> value in [true, "true", 1, "1"]
+      :error -> false
+    end
+  end
 
   defp take_params(params, keys) do
     Enum.reduce(keys, %{}, fn key, acc ->
